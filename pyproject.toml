@@ -1,9 +1,9 @@
 [project]
-name = "mcp-learning"
+name = "EV Assitant Server"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP Server for Ev assistant to help user find nearest charging stations, answer question about ocpp"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "colorlog>=6.9.0",
     "langchain-community>=0.3.19",
