@@ -1,0 +1,18 @@
+[project]
+name = "mcp-learning"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "colorlog>=6.9.0",
+    "langchain-community>=0.3.19",
+    "mcp[cli]>=1.4.1",
+    "openai>=1.66.3",
+    "psutil>=7.0.0",
+    "pymupdf>=1.25.4",
+    "pypdf>=5.4.0",
+    "python-decouple>=3.8",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.3",
+]

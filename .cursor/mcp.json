@@ -1,0 +1,8 @@
+{
+    "mcpServers": {
+      "ev_assistant": {
+        "command": "/home/abiorh/ai/mcp_learning/.venv/bin/python",
+        "args": ["/home/abiorh/ai/mcp_learning/mcp_server.py"]
+      }
+    }
+}
