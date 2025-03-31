@@ -54,10 +54,7 @@ source .venv/bin/activate  # On Linux/Mac
 
 ### 3. Install Dependencies
 ```bash
-python -m pip install langchain-community
-python -m pip install python-dotenv
-python -m pip install PyPDF2
-python -m pip install PyMuPDF  # Optional: for PDF fallback processing
+uv sync
 ```
 
 ## Configuration

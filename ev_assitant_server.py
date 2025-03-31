@@ -17,6 +17,17 @@ from mcp.types import (
     ServerCapabilities,
     ResourcesCapability,
     ToolsCapability,
+    ClientNotification,
+    ToolListChangedNotification,
+    #ToolsChangedParams,
+    ResourceListChangedNotification,
+    ResourceUpdatedNotificationParams,
+    ResourceUpdatedNotification,
+    ServerNotification,
+    PromptListChangedNotification,
+    #ResourcesChangedParams,
+    LoggingLevel,
+    LoggingCapability,
 )
 from mcp.server.models import InitializationOptions
 import mcp.server.stdio
@@ -26,32 +37,190 @@ from core.schemas import CHARGE_POINT_LOCATOR_SCHEMA, EV_TRIP_PLANNER_SCHEMA, Fi
 from agentTools.charge_station_locator import charge_points_locator
 from agentTools.ev_trip_planner import ev_trip_planner
 import glob
+from collections import defaultdict
 dotenv.load_dotenv()
-
+from mcp.server.session import ServerSession
 server = Server("MCP EV Assistant Server")
 
-# Dictionary to track subscribers
-resource_subscribers = {}
+client_sessions: dict[str, ServerSession] = {}
+# Mapping of URIs to sets of client IDs
+resource_subscribers: dict[str, set[str]] = defaultdict(set)
+# tool_subscribers: dict[str, set[str]] = defaultdict(set)
+async def store_client_session_if_needed():
+    """
+    Store the client session if it hasn't been stored yet.
+    """
+    client_session = server.request_context.session
+    client_id = client_session.client_params.clientId
 
-# Function to add a subscriber
-def add_subscriber(uri: str, client_id: str):
-    if uri not in resource_subscribers:
-        resource_subscribers[uri] = set()
+    if client_id not in client_sessions:
+        client_sessions[client_id] = client_session
+        logger.info(f"Stored session for client: {client_id}")
+    logger.info(f"dir(client_session): {dir(client_session)}")
+
+@server.set_logging_level()
+async def handle_set_logging_level(level: LoggingLevel) -> None:
+    """Handle logging level changes"""
+    try:
+        # Convert MCP logging level to Python logging level
+        python_level = {
+            LoggingLevel.DEBUG: logging.DEBUG,
+            LoggingLevel.INFO: logging.INFO,
+            LoggingLevel.WARNING: logging.WARNING,
+            LoggingLevel.ERROR: logging.ERROR,
+        }.get(level, logging.INFO)
+        
+        # Set the logging level
+        logger.setLevel(python_level)
+        logger.info(f"Logging level set to {level}")
+    except Exception as e:
+        logger.error(f"Error setting logging level: {e}")
+
+
+
+def add_subscriber(uri: str, client_id: str) -> None:
+    """Add a client to the list of subscribers for a URI."""
     resource_subscribers[uri].add(client_id)
 
-# Function to remove a subscriber
-def remove_subscriber(uri: str, client_id: str):
+def remove_subscriber(uri: str, client_id: str) -> None:
+    """Remove a client from the list of subscribers for a URI."""
     if uri in resource_subscribers:
         resource_subscribers[uri].discard(client_id)
-        if not resource_subscribers[uri]:  # Remove the entry if no subscribers left
+        if not resource_subscribers[uri]:  # Remove the entry if no subscribers remain
             del resource_subscribers[uri]
+            logger.info(f"Removed resource {uri} from resource_subscribers")
+# Add these functions after the existing resource subscriber functions
+# def add_tool_subscriber(client_id: str):
+#     """Add a client to the tool subscribers list"""
+#     tool_subscribers.add(client_id)
+#     logger.info(f"Client {client_id} subscribed to tool changes")
+
+# def remove_tool_subscriber(client_id: str):
+#     """Remove a client from the tool subscribers list"""
+#     tool_subscribers.discard(client_id)
+#     logger.info(f"Client {client_id} unsubscribed from tool changes")
+
+
+
+
+@server.subscribe_resource()
+async def handle_subscribe_resource(uri: str) -> None:
+    client_id = server.request_context.session.client_params.clientId
+    # store the client session if needed
+    await store_client_session_if_needed()
+    logger.info(f"Client {client_id} subscribed to resource: {uri}")
+    add_subscriber(uri, client_id)
+
+@server.unsubscribe_resource()
+async def handle_unsubscribe_resource(uri: str) -> None:
+    logger.info(f"handle_unsubscribe_resource: {uri}")
+    client_id = server.request_context.session.client_params.clientId
+    logger.info(f"Client {client_id} unsubscribed from resource: {uri}")
+    remove_subscriber(uri, client_id)
+
+
+async def notify_resource_change(uri: str):
+    """Notify subscribers about resource changes"""
+    # store the client session if needed
+    await store_client_session_if_needed()
+    try:
+        if uri in resource_subscribers:
+            # Create a notification message
+            notification = ServerNotification(
+                ResourceUpdatedNotification(
+                    method="notifications/resources/updated",
+                    params=ResourceUpdatedNotificationParams(uri=uri),
+                )
+            )
+            
+            # Send notification to all subscribers of this resource
+            for client_id in resource_subscribers[uri]:
+                try:
+                    session = client_sessions.get(client_id)
+                    if session:
+                        await session.send_notification(notification)
+                        logger.info(f"Sent resource change notification to client {client_id} for {uri}")
+                    else:
+                        logger.error(f"Client {client_id} not found in client_sessions")
+                except Exception as e:
+                    logger.error(f"Failed to send resource notification to client {client_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error in notify_resource_change: {e}")
+
+
+async def notify_resource_list_changed() -> None:
+    """Send all clients a resource list changed notification."""
+    # store the client session if needed this ensures that the client sessions are stored before sending the notification
+    await store_client_session_if_needed()
+    for client_id in client_sessions:
+        session = client_sessions.get(client_id)
+        if session:
+            await session.send_notification(
+            ServerNotification(
+                ResourceListChangedNotification(
+                    method="notifications/resources/list_changed",
+                )
+                )
+            )
+            logger.info(f"Sent resource list changed notification to client {client_id}")
+        else:
+            logger.error(f"Client {client_id} not found in client_sessions")
+
+async def notify_tool_list_changed() -> None:
+    """Send a tool list changed notification."""
+    await store_client_session_if_needed()
+    for client_id in client_sessions:
+        session = client_sessions.get(client_id)
+        if session:
+            await session.send_notification(
+                ServerNotification(
+                    ToolListChangedNotification(
+                        method="notifications/tools/list_changed",
+                    )
+                )
+            )
+            logger.info(f"Sent tool list changed notification to client {client_id}")
+        else:
+            logger.error(f"Client {client_id} not found in client_sessions")
+
+async def notify_prompt_list_changed() -> None:
+    """Send a prompt list changed notification."""
+    await store_client_session_if_needed()
+    for client_id in client_sessions:
+        session = client_sessions.get(client_id)
+        if session:
+            await session.send_notification(
+                ServerNotification(
+                    PromptListChangedNotification(
+                        method="notifications/prompts/list_changed",
+                    )
+                )
+            )
+            logger.info(f"Sent prompt list changed notification to client {client_id}")
+        else:
+            logger.error(f"Client {client_id} not found in client_sessions")
+
+
+def get_capabilities() -> ServerCapabilities:
+    return ServerCapabilities(
+        prompts=None,
+        resources=ResourcesCapability(
+            subscribe=True,
+            listChanged=True
+        ),
+        tools=ToolsCapability(
+            listChanged=True
+        ),
+        logging=LoggingCapability(),
+        experimental={}
+    )
 
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
     """
     List the tools available to the server
     """
-    return [
+    tools = [
         Tool(
             name="charge_points_locator",
             description="Find EV charging stations near a specified location",
@@ -63,6 +232,11 @@ async def handle_list_tools() -> list[Tool]:
             inputSchema=EV_TRIP_PLANNER_SCHEMA
         )
     ]
+    
+    # Notify about tool changes
+    #await notify_tool_change()
+    
+    return tools
 
 
 @server.call_tool()
@@ -114,6 +288,9 @@ async def handle_read_resource(uri: str) -> bytes:
     "handle the read resource request"
     try:
         logger.info(f"Reading resource: {uri}")
+        # await notify_resource_change(uri)
+        # await notify_tool_list_changed()
+        # await notify_prompt_list_changed()
         # extract the name from the url
         if not str(uri).startswith("file:///pdf/"):
             raise ValueError(f"Unsupported resource URL: {uri}")
@@ -175,10 +352,12 @@ async def handle_read_resource(uri: str) -> bytes:
             except Exception as e:
                 logger.error(f"PyMuPDF fallback also failed: {str(e)}")
                 return f"ERROR: Failed to extract text with both primary and fallback methods. Error: {str(e)}"
-        
+        import uuid
+        progress_token = f"charging_station_user_guide_{str(uuid.uuid4())}"
         # Extract text from pages
         pdf_text = ""
         for i, page in enumerate(pages):
+            await server.request_context.session.send_progress_notification(progress_token, i, len(pages))
             page_content = page.page_content.strip()
             pdf_text += f"\n\n--- Page {i+1} ---\n\n"
             pdf_text += page_content
@@ -189,6 +368,10 @@ async def handle_read_resource(uri: str) -> bytes:
             return "ERROR: No text could be extracted from this PDF. It might be a scanned document without OCR."
         
         logger.info(f"Successfully extracted text: {len(pdf_text)} characters")
+        
+        # Notify subscribers about the resource change
+        #await notify_resource_change(uri)
+        
         return pdf_text
 
     except Exception as e:
@@ -345,30 +528,7 @@ async def handle_get_prompt(name: str, arguments: dict | None) -> GetPromptResul
         )
         return prompt_response
 
-@server.progress_notification()
-async def handle_progress(progress_token: str | int, progress: float, total: float | None) -> None:
-    logger.info(f"Progress notification: {progress_token}, {progress}/{total}")
 
-@server.subscribe_resource()
-async def handle_subscribe_resource(uri: str) -> None:
-    client_id = server.request_context.session.client_id  # Get client ID from the session
-    logger.info(f"Client {client_id} subscribed to resource: {uri}")
-    add_subscriber(uri, client_id)
-
-@server.unsubscribe_resource()
-async def handle_unsubscribe_resource(uri: str) -> None:
-    client_id = server.request_context.session.client_id  # Get client ID from the session
-    logger.info(f"Client {client_id} unsubscribed from resource: {uri}")
-    remove_subscriber(uri, client_id)
-
-def get_capabilities() -> ServerCapabilities:
-    return ServerCapabilities(
-        prompts=None,
-        resources=ResourcesCapability(subscribe=True, listChanged=True),
-        tools=ToolsCapability(listChanged=True),
-        logging=None,
-        experimental={}
-    )
 # main function
 async def main():
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -382,17 +542,7 @@ async def main():
             ),
         )
 
-async def notify_tool_change():
-    # Logic to notify clients about tool changes
-    for subscriber in tool_subscribers:
-        await subscriber.notify("Tool list has changed")
 
-async def notify_resource_change(uri: str):
-    if uri in resource_subscribers:
-        for client_id in resource_subscribers[uri]:
-            # Logic to send a notification to the client
-            logger.info(f"Notifying client {client_id} about resource change: {uri}")
-            # Example: await send_notification_to_client(client_id, f"Resource {uri} has changed")
 
 if __name__ == "__main__":
     logger.info("Starting MCP server...")
