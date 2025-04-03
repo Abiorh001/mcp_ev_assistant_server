@@ -1,5 +1,5 @@
 [project]
-name = "EV Assitant Server"
+name = "EV_Assitant_Server"
 version = "0.1.0"
 description = "MCP Server for Ev assistant to help user find nearest charging stations, answer question about ocpp"
 readme = "README.md"
@@ -15,4 +15,5 @@ dependencies = [
     "python-decouple>=3.8",
     "python-dotenv>=1.0.1",
     "requests>=2.32.3",
+    "uvicorn>=0.34.0",
 ]

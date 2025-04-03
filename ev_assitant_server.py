@@ -30,16 +30,21 @@ from mcp.types import (
     LoggingCapability,
 )
 from mcp.server.models import InitializationOptions
-import mcp.server.stdio
 from core.logger import logger
 from pydantic.error_wrappers import ValidationError
 from core.schemas import CHARGE_POINT_LOCATOR_SCHEMA, EV_TRIP_PLANNER_SCHEMA, FindChargingStationsPrompt, ChargingTimeEstimatePrompt, RoutePlannerPrompt
 from agentTools.charge_station_locator import charge_points_locator
 from agentTools.ev_trip_planner import ev_trip_planner
 import glob
+import time
 from collections import defaultdict
 dotenv.load_dotenv()
 from mcp.server.session import ServerSession
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+import uvicorn
+import mcp.server.stdio
 server = Server("MCP EV Assistant Server")
 
 client_sessions: dict[str, ServerSession] = {}
@@ -56,7 +61,7 @@ async def store_client_session_if_needed():
     if client_id not in client_sessions:
         client_sessions[client_id] = client_session
         logger.info(f"Stored session for client: {client_id}")
-    logger.info(f"dir(client_session): {dir(client_session)}")
+
 
 @server.set_logging_level()
 async def handle_set_logging_level(level: LoggingLevel) -> None:
@@ -289,8 +294,36 @@ async def handle_read_resource(uri: str) -> bytes:
     try:
         logger.info(f"Reading resource: {uri}")
         # await notify_resource_change(uri)
+        # time.sleep(3)
+        # await notify_resource_list_changed()
+        # time.sleep(3)
         # await notify_tool_list_changed()
+        # time.sleep(3)
         # await notify_prompt_list_changed()
+        # test the create message
+        result = await server.request_context.session.create_message(
+            messages=[
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": "Hello, how are you?"
+                    }
+                }
+            ],
+            max_tokens=100,
+            system_prompt="You are a helpful assistant that can answer questions and help with tasks.",
+            temperature=0.5,
+            stop_sequences=["\n\n"],
+            model_preferences={
+                "hints":[
+                    {   "provider": "gemini",
+                        "name": "gemini-1.5-flash",
+                    }
+                ]
+            }
+        )
+        logger.info(f"Result from create message: {result}")
         # extract the name from the url
         if not str(uri).startswith("file:///pdf/"):
             raise ValueError(f"Unsupported resource URL: {uri}")
@@ -528,25 +561,63 @@ async def handle_get_prompt(name: str, arguments: dict | None) -> GetPromptResul
         )
         return prompt_response
 
-
+# initialization options
+init_options = InitializationOptions(
+                server_name="MCP Low Level EV Assistant Server",
+                server_version="1.0.0",
+                capabilities=get_capabilities(),
+            )
 # main function
-async def main():
+async def sse_main():
+    # Create an SSE transport at an endpoint
+    sse = SseServerTransport("/messages/")
+
+    # Define handler function for SSE connections
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            # Run the server with the streams and initialization options
+            await server.run(
+                streams[0],  # read stream
+                streams[1],  # write stream
+                init_options
+            )
+
+    # Create Starlette routes for SSE and message handling
+    starlette_app = Starlette(
+        debug=True,
+        routes=[
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages/", app=sse.handle_post_message),
+    ])
+    
+    config = uvicorn.Config(
+        starlette_app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )
+    
+    # Create and run server
+    uvicorn_server = uvicorn.Server(config)
+    await uvicorn_server.serve()
+
+
+async def stdio_main():
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
             write_stream,
-            InitializationOptions(
-                server_name="MCP Low Level EV Assistant Server",
-                server_version="1.0.0",
-                capabilities=get_capabilities(),
-            ),
+            init_options
         )
-
-
 
 if __name__ == "__main__":
     logger.info("Starting MCP server...")
-    asyncio.run(main())
+    # uncomment this to run the sse server
+    # asyncio.run(sse_main())
+    # uncomment this to run the stdio server
+    asyncio.run(stdio_main())
     
     
 
