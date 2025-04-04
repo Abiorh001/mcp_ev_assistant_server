@@ -47,21 +47,22 @@ import uvicorn
 import mcp.server.stdio
 server = Server("MCP EV Assistant Server")
 
-client_sessions: dict[str, ServerSession] = {}
+
 # Mapping of URIs to sets of client IDs
-resource_subscribers: dict[str, set[str]] = defaultdict(set)
-# tool_subscribers: dict[str, set[str]] = defaultdict(set)
+resource_subscribers: dict[str, set[ServerSession]] = defaultdict(set)
+client_sessions: dict[str, ServerSession] = {}
+
 async def store_client_session_if_needed():
     """
     Store the client session if it hasn't been stored yet.
     """
     client_session = server.request_context.session
-    client_id = client_session.client_params.clientId
-
-    if client_id not in client_sessions:
-        client_sessions[client_id] = client_session
-        logger.info(f"Stored session for client: {client_id}")
-
+    if client_session not in client_sessions:
+        client_sessions[client_session] = client_session
+        logger.info(f"Stored session for client: {client_session}")
+    else:
+        logger.info(f"Session already stored for client: {client_session}")
+    logger.info(f"Client sessions: {client_sessions}")
 
 @server.set_logging_level()
 async def handle_set_logging_level(level: LoggingLevel) -> None:
@@ -83,51 +84,37 @@ async def handle_set_logging_level(level: LoggingLevel) -> None:
 
 
 
-def add_subscriber(uri: str, client_id: str) -> None:
+def add_subscriber(uri: str) -> None:
     """Add a client to the list of subscribers for a URI."""
-    resource_subscribers[uri].add(client_id)
+    client_session = server.request_context.session
+    resource_subscribers[uri].add(client_session)
 
-def remove_subscriber(uri: str, client_id: str) -> None:
+def remove_subscriber(uri: str) -> None:
     """Remove a client from the list of subscribers for a URI."""
+    client_session = server.request_context.session
     if uri in resource_subscribers:
-        resource_subscribers[uri].discard(client_id)
+        resource_subscribers[uri].discard(client_session)
         if not resource_subscribers[uri]:  # Remove the entry if no subscribers remain
             del resource_subscribers[uri]
             logger.info(f"Removed resource {uri} from resource_subscribers")
-# Add these functions after the existing resource subscriber functions
-# def add_tool_subscriber(client_id: str):
-#     """Add a client to the tool subscribers list"""
-#     tool_subscribers.add(client_id)
-#     logger.info(f"Client {client_id} subscribed to tool changes")
 
-# def remove_tool_subscriber(client_id: str):
-#     """Remove a client from the tool subscribers list"""
-#     tool_subscribers.discard(client_id)
-#     logger.info(f"Client {client_id} unsubscribed from tool changes")
 
 
 
 
 @server.subscribe_resource()
 async def handle_subscribe_resource(uri: str) -> None:
-    client_id = server.request_context.session.client_params.clientId
-    # store the client session if needed
-    await store_client_session_if_needed()
-    logger.info(f"Client {client_id} subscribed to resource: {uri}")
-    add_subscriber(uri, client_id)
+    logger.info(f"Client {server.request_context.session} subscribed to resource: {uri}")
+    add_subscriber(uri)
 
 @server.unsubscribe_resource()
 async def handle_unsubscribe_resource(uri: str) -> None:
-    logger.info(f"handle_unsubscribe_resource: {uri}")
-    client_id = server.request_context.session.client_params.clientId
-    logger.info(f"Client {client_id} unsubscribed from resource: {uri}")
-    remove_subscriber(uri, client_id)
+    logger.info(f"handle_unsubscribe_resource: {uri}")  
+    remove_subscriber(uri)
 
 
 async def notify_resource_change(uri: str):
     """Notify subscribers about resource changes"""
-    # store the client session if needed
-    await store_client_session_if_needed()
     try:
         if uri in resource_subscribers:
             # Create a notification message
@@ -139,71 +126,135 @@ async def notify_resource_change(uri: str):
             )
             
             # Send notification to all subscribers of this resource
-            for client_id in resource_subscribers[uri]:
+            for client_session in resource_subscribers[uri]:
                 try:
-                    session = client_sessions.get(client_id)
-                    if session:
-                        await session.send_notification(notification)
-                        logger.info(f"Sent resource change notification to client {client_id} for {uri}")
+                    if client_session:
+                        await client_session.send_notification(notification)
+                        logger.info(f"Sent resource change notification to client {client_session}")
                     else:
-                        logger.error(f"Client {client_id} not found in client_sessions")
+                        logger.error("Client not found in client_sessions")
                 except Exception as e:
-                    logger.error(f"Failed to send resource notification to client {client_id}: {e}")
+                    logger.error(f"Failed to send resource notification to client: {e}")
     except Exception as e:
         logger.error(f"Error in notify_resource_change: {e}")
 
 
 async def notify_resource_list_changed() -> None:
     """Send all clients a resource list changed notification."""
-    # store the client session if needed this ensures that the client sessions are stored before sending the notification
-    await store_client_session_if_needed()
-    for client_id in client_sessions:
-        session = client_sessions.get(client_id)
-        if session:
-            await session.send_notification(
-            ServerNotification(
-                ResourceListChangedNotification(
-                    method="notifications/resources/list_changed",
-                )
-                )
-            )
-            logger.info(f"Sent resource list changed notification to client {client_id}")
-        else:
-            logger.error(f"Client {client_id} not found in client_sessions")
+    try:
+        await store_client_session_if_needed()
+        # Create a set to track successfully sent notifications
+        sent_sessions = set()
+        
+        # Keep trying until all sessions are processed
+        while True:
+            # Get sessions that haven't been sent to yet
+            remaining_sessions = set(client_sessions.values()) - sent_sessions
+            if not remaining_sessions:
+                logger.info("All resource list change notifications have been processed")
+                # clear the sent_sessions
+                sent_sessions.clear()
+                break
+                
+            for client_session in remaining_sessions:
+                try:
+                    await client_session.send_notification(
+                        ServerNotification(
+                            ResourceListChangedNotification(
+                                method="notifications/resources/list_changed",
+                            )
+                        )
+                    )
+                    logger.info(f"Sent resource list changed notification to client {client_session}")
+                    sent_sessions.add(client_session)
+                except Exception as e:
+                    logger.error(f"Error sending notification to client {client_session}: {e}")
+                    # Remove the disconnected session
+                    if client_session in client_sessions.values():
+                        del client_sessions[client_session]
+                    # Continue with other sessions
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Error in notify_resource_list_changed: {e}")
 
 async def notify_tool_list_changed() -> None:
     """Send a tool list changed notification."""
-    await store_client_session_if_needed()
-    for client_id in client_sessions:
-        session = client_sessions.get(client_id)
-        if session:
-            await session.send_notification(
-                ServerNotification(
-                    ToolListChangedNotification(
-                        method="notifications/tools/list_changed",
+    try:
+        await store_client_session_if_needed()
+        # Create a set to track successfully sent notifications
+        sent_sessions = set()
+        
+        # Keep trying until all sessions are processed
+        while True:
+            # Get sessions that haven't been sent to yet
+            remaining_sessions = set(client_sessions.values()) - sent_sessions
+            if not remaining_sessions:
+                logger.info("All tool list change notifications have been processed")
+                # clear the sent_sessions
+                sent_sessions.clear()
+                break
+                
+            for client_session in remaining_sessions:
+                try:
+                    await client_session.send_notification(
+                        ServerNotification(
+                            ToolListChangedNotification(
+                                method="notifications/tools/list_changed",
+                            )
+                        )
                     )
-                )
-            )
-            logger.info(f"Sent tool list changed notification to client {client_id}")
-        else:
-            logger.error(f"Client {client_id} not found in client_sessions")
+                    logger.info(f"Sent tool list changed notification to client {client_session}")
+                    sent_sessions.add(client_session)
+                except Exception as e:
+                    logger.error(f"Error sending tool list notification to client {client_session}: {e}")
+                    # Remove the disconnected session
+                    if client_session in client_sessions.values():
+                        del client_sessions[client_session]
+                    # Continue with other sessions
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Error in notify_tool_list_changed: {e}")
 
 async def notify_prompt_list_changed() -> None:
     """Send a prompt list changed notification."""
-    await store_client_session_if_needed()
-    for client_id in client_sessions:
-        session = client_sessions.get(client_id)
-        if session:
-            await session.send_notification(
-                ServerNotification(
-                    PromptListChangedNotification(
-                        method="notifications/prompts/list_changed",
+    try:
+        await store_client_session_if_needed()
+        # Create a set to track successfully sent notifications
+        sent_sessions = set()
+        
+        # Keep trying until all sessions are processed
+        while True:
+            # Get sessions that haven't been sent to yet
+            remaining_sessions = set(client_sessions.values()) - sent_sessions
+            if not remaining_sessions:
+                logger.info("All prompt list change notifications have been processed")
+                # clear the sent_sessions
+                sent_sessions.clear()
+                break
+                
+            for client_session in remaining_sessions:
+                try:
+                    await client_session.send_notification(
+                        ServerNotification(
+                            PromptListChangedNotification(
+                                method="notifications/prompts/list_changed",
+                            )
+                        )
                     )
-                )
-            )
-            logger.info(f"Sent prompt list changed notification to client {client_id}")
-        else:
-            logger.error(f"Client {client_id} not found in client_sessions")
+                    logger.info(f"Sent prompt list changed notification to client {client_session}")
+                    sent_sessions.add(client_session)
+                except Exception as e:
+                    logger.error(f"Error sending prompt list notification to client {client_session}: {e}")
+                    # Remove the disconnected session
+                    if client_session in client_sessions.values():
+                        del client_sessions[client_session]
+                    # Continue with other sessions
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Error in notify_prompt_list_changed: {e}")
 
 
 def get_capabilities() -> ServerCapabilities:
@@ -220,6 +271,7 @@ def get_capabilities() -> ServerCapabilities:
         experimental={}
     )
 
+
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
     """
@@ -235,12 +287,9 @@ async def handle_list_tools() -> list[Tool]:
             name="ev_trip_planner",
             description="Plan a trip for an electric vehicle",
             inputSchema=EV_TRIP_PLANNER_SCHEMA
-        )
+        ),
+        
     ]
-    
-    # Notify about tool changes
-    #await notify_tool_change()
-    
     return tools
 
 
@@ -293,37 +342,37 @@ async def handle_read_resource(uri: str) -> bytes:
     "handle the read resource request"
     try:
         logger.info(f"Reading resource: {uri}")
-        # await notify_resource_change(uri)
-        # time.sleep(3)
-        # await notify_resource_list_changed()
-        # time.sleep(3)
-        # await notify_tool_list_changed()
-        # time.sleep(3)
-        # await notify_prompt_list_changed()
+        await notify_resource_change(uri)
+        time.sleep(3)
+        await notify_resource_list_changed()
+        time.sleep(3)
+        await notify_tool_list_changed()
+        time.sleep(3)
+        await notify_prompt_list_changed()
         # test the create message
-        result = await server.request_context.session.create_message(
-            messages=[
-                {
-                    "role": "user",
-                    "content": {
-                        "type": "text",
-                        "text": "Hello, how are you?"
-                    }
-                }
-            ],
-            max_tokens=100,
-            system_prompt="You are a helpful assistant that can answer questions and help with tasks.",
-            temperature=0.5,
-            stop_sequences=["\n\n"],
-            model_preferences={
-                "hints":[
-                    {   "provider": "gemini",
-                        "name": "gemini-1.5-flash",
-                    }
-                ]
-            }
-        )
-        logger.info(f"Result from create message: {result}")
+        # result = await server.request_context.session.create_message(
+        #     messages=[
+        #         {
+        #             "role": "user",
+        #             "content": {
+        #                 "type": "text",
+        #                 "text": "Hello, how are you?"
+        #             }
+        #         }
+        #     ],
+        #     max_tokens=100,
+        #     system_prompt="You are a helpful assistant that can answer questions and help with tasks.",
+        #     temperature=0.5,
+        #     stop_sequences=["\n\n"],
+        #     model_preferences={
+        #         "hints":[
+        #             {   "provider": "gemini",
+        #                 "name": "gemini-1.5-flash",
+        #             }
+        #         ]
+        #     }
+        # )
+        # logger.info(f"Result from create message: {result}")
         # extract the name from the url
         if not str(uri).startswith("file:///pdf/"):
             raise ValueError(f"Unsupported resource URL: {uri}")

@@ -35,13 +35,15 @@ CHARGE_POINT_LOCATOR_SCHEMA = {
             "description": "The distance in kilometers to search for charging stations"
         },
         "socket_type": {
-            "type": ["string", "null"],
+            "type": "string",
+            "nullable": True,
             "description": "The type of charging socket (e.g., 'CCS', 'CHAdeMO', 'Type 2'). If not provided, all types will be returned."
         }
     },
     "required": ["address", "max_distance"],
     "additionalProperties": False
 }
+
 
 EV_TRIP_PLANNER_SCHEMA = {
     "type": "object",
@@ -55,13 +57,15 @@ EV_TRIP_PLANNER_SCHEMA = {
             "description": "The destination address for the trip"
         },
         "socket_type": {
-            "type": ["string", "null"],
+            "type": "string",
+            "nullable": True,
             "description": "The type of charging socket (e.g., 'CCS', 'CHAdeMO', 'Type 2'). If not provided, all types will be considered."
         }
     },
     "required": ["user_address", "user_destination_address"],
     "additionalProperties": False
 }
+
 
 # schemas for prompts
 class FindChargingStationsPrompt(BaseModel):
